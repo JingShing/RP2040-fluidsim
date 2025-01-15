@@ -2,6 +2,16 @@
 
 #include <LovyanGFX.h>
 
+#define GRID_SIZE_X 12    // 网格分辨率 X
+#define GRID_SIZE_Y 12    // 网格分辨率 Y
+#define NUM_PARTICLES 30  // 粒子数量
+#define CELL_SIZE 20      // 每个网格单元的尺寸（像素）
+#define TFT_GRAY TFT_DARKGRAY
+
+// 流体网格类型
+enum CellType { FLUID_CELL, SOLID_CELL, AIR_CELL };
+
+// 粒子结
 class LGFX_GC9A01 : public lgfx::LGFX_Device {
  private:
   lgfx::Panel_GC9A01 _panel_instance;
