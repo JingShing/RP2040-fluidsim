@@ -9,7 +9,6 @@
 #define TFT_GRAY TFT_DARKGRAY
 
 // 流体网格类型
-enum CellType { FLUID_CELL, SOLID_CELL, AIR_CELL };
 
 // 粒子结
 class LGFX_GC9A01 : public lgfx::LGFX_Device {
