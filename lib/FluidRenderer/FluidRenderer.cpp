@@ -27,10 +27,17 @@ uint16_t FluidRenderer::lerp565(uint16_t c1, uint16_t c2, float t) const {
 
 void FluidRenderer::render(Mode mode) {
   m_disp->startWrite();
-  if (mode == BALLS)
-    renderBalls();
-  else
-    renderGrid();
+  switch (mode) {
+    case BALLS:
+      renderBalls();
+      break;
+    case GRID:
+      renderGrid();
+      break;
+    case PARTIAL_GRID:
+      renderPartialGrid();
+      break;
+  }
   m_disp->endWrite();
 }
 
@@ -101,5 +108,45 @@ void FluidRenderer::renderGrid() {
       m_disp->drawRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL,
                        m_disp->color565(10, 10, 20));
     }
+  }
+}
+
+void FluidRenderer::renderPartialGrid() {
+  const int* ids = m_sim->changedIndices();
+  const int cnt = m_sim->changedCount();
+
+  // 统计并打印
+  Serial.printf("Changed cells this frame: %d\n", cnt);
+
+  for (int n = 0; n < cnt; ++n) {
+    int idx = ids[n];
+    int gx = idx / LOGICAL_GRID_SIZE;
+    int gy = idx % LOGICAL_GRID_SIZE;
+
+    if (m_sim->isSolid(gx, gy))
+      continue;  // 固体不用重画
+
+    // 像素坐标
+    int px = gx * PIXEL_PER_CELL;
+    int py = gy * PIXEL_PER_CELL;
+
+    // 颜色
+    uint16_t color;
+    switch (m_sim->m_currFluid[idx]) {
+      case FLUID_LIQUID:
+        color = m_gridFluid;
+        break;
+      case FLUID_FOAM:
+        color = m_gridFoam;
+        break;
+      default:
+        color = m_disp->color565(5, 5, 20);
+        break;
+    }
+
+    // 绘制
+    m_disp->fillRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL, color);
+    m_disp->drawRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL,
+                     m_disp->color565(10, 10, 20));
   }
 }

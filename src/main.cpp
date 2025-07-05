@@ -76,7 +76,7 @@ void loop() {
 
   // ----------- 渲染（格子模式） -----------
   unsigned long t0 = micros();
-  renderer.render(FluidRenderer::GRID);
+  renderer.render(FluidRenderer::PARTIAL_GRID);
   rendAccumUs += micros() - t0;
 
   // --- 叠加 FPS 文本 ---
