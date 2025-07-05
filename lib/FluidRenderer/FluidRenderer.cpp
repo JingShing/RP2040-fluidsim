@@ -69,9 +69,10 @@ void FluidRenderer::renderBalls() {
 
 void FluidRenderer::renderGrid() {
   // 0. 颜色表（可再做成成员变量）
-  const uint16_t emptyCol = m_disp->color565(5, 5, 20);      // 深蓝：空气
-  const uint16_t liquidCol = m_gridFluid;                    // 现有液体色
-  const uint16_t foamCol = m_disp->color565(230, 230, 230);  // 近白：泡沫
+  const uint16_t emptyCol = m_disp->color565(0, 0, 0);        // 深蓝：空气
+  const uint16_t liquidCol = m_disp->color565(30, 30, 230);   // 现有液体色
+  const uint16_t liquidRimCol = m_disp->color565(0, 0, 120);  // 现有液体色
+  const uint16_t foamCol = m_disp->color565(200, 200, 230);   // 近白：泡沫
 
   // 1. 先清屏
   m_disp->fillScreen(emptyCol);
@@ -96,6 +97,9 @@ void FluidRenderer::renderGrid() {
           case FLUID_FOAM:
             color = foamCol;
             break;
+          case FLUID_RIM:
+            color = liquidRimCol;
+            break;
           default:
             color = emptyCol;
             break;  // FLUID_EMPTY
@@ -112,11 +116,17 @@ void FluidRenderer::renderGrid() {
 }
 
 void FluidRenderer::renderPartialGrid() {
+  // 0. 颜色表（可再做成成员变量）
+  const uint16_t emptyCol = m_disp->color565(0, 0, 0);        // 深蓝：空气
+  const uint16_t liquidCol = m_disp->color565(30, 30, 230);   // 现有液体色
+  const uint16_t liquidRimCol = m_disp->color565(0, 0, 120);  // 现有液体色
+  const uint16_t foamCol = m_disp->color565(200, 200, 230);   // 近白：泡沫
+
   const int* ids = m_sim->changedIndices();
   const int cnt = m_sim->changedCount();
 
   // 统计并打印
-  Serial.printf("Changed cells this frame: %d\n", cnt);
+  // Serial.printf("Changed cells this frame: %d\n", cnt);
 
   for (int n = 0; n < cnt; ++n) {
     int idx = ids[n];
@@ -134,14 +144,17 @@ void FluidRenderer::renderPartialGrid() {
     uint16_t color;
     switch (m_sim->m_currFluid[idx]) {
       case FLUID_LIQUID:
-        color = m_gridFluid;
+        color = liquidCol;
         break;
       case FLUID_FOAM:
-        color = m_gridFoam;
+        color = foamCol;
+        break;
+      case FLUID_RIM:
+        color = liquidRimCol;
         break;
       default:
-        color = m_disp->color565(5, 5, 20);
-        break;
+        color = emptyCol;
+        break;  // FLUID_EMPTY
     }
 
     // 绘制

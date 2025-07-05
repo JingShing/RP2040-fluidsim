@@ -13,9 +13,10 @@ static FluidRenderer renderer(&display, &sim);  // <<<
 
 // ─────────────── 帧率 / 物理步长设定 ───────────────
 static unsigned long lastFrameTime = 0;
-static constexpr float TARGET_FPS = 10.0f;
+static constexpr float TARGET_FPS = 30.0f;
 static constexpr float FRAME_TIME_MS = 1000.0f / TARGET_FPS;
 static constexpr float FIXED_DT = 1.0f / TARGET_FPS;
+static constexpr float TIME_MULTIPLIER = 5.0f;
 
 // ─────────────── 统计计时器 ───────────────
 static unsigned long physAccumUs = 0;
@@ -63,19 +64,17 @@ void loop() {
   float deltaTime = (nowMs - lastFrameTime) * 0.001f;
 
   // ----------- 固定步长物理 -----------
-  static float acc = 0.0f;
-  acc += deltaTime;
-  acc = min(acc, 0.1f);
+  float time_dt = min(FIXED_DT * TIME_MULTIPLIER, 0.1f);
 
-  while (acc >= FIXED_DT) {
-    unsigned long t0 = micros();
-    sim.simulate(FIXED_DT);
-    physAccumUs += micros() - t0;
-    acc -= FIXED_DT;
-  }
+  // while (acc >= FIXED_DT) {
+  unsigned long t0 = micros();
+  sim.simulate(time_dt);
+  physAccumUs += micros() - t0;
+  //   acc -= FIXED_DT;
+  // }
 
   // ----------- 渲染（格子模式） -----------
-  unsigned long t0 = micros();
+  t0 = micros();
   renderer.render(FluidRenderer::PARTIAL_GRID);
   rendAccumUs += micros() - t0;
 
@@ -101,8 +100,8 @@ void loop() {
 
   // ----------- 每秒串口打印统计 -----------
   if (nowMs - lastPrintMs >= 1000) {
-    Serial.printf("[FPS %3u] Physics: %.2f ms  |  Render: %.2f ms\r\n",
-                  frameCounter, physAccumUs * 0.001f, rendAccumUs * 0.001f);
+    // Serial.printf("[FPS %3u] Physics: %.2f ms  |  Render: %.2f ms\r\n",
+    //               frameCounter, physAccumUs * 0.001f, rendAccumUs * 0.001f);
     physAccumUs = rendAccumUs = 0;
     frameCounter = 0;
     lastPrintMs = nowMs;

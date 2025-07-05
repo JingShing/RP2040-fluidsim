@@ -1,30 +1,17 @@
-/**************************************************************************
- *  ParticleSimulation.cpp  ――  2-D FLIP Demo (ESP32 + LovyanGFX)        *
- *                                                                       *
- *  - 圆形 SOLID_CELL 容器                                               *
- *  - 粒子 ↔ 网格 (简化 FLIP / PIC)                                       *
- *  - m_changedIdx / m_changedCnt 记录本帧状态变更单元                    *
- *  - classifyCell() 依据粒子计数 & 平均速度判定 EMPTY / LIQUID / FOAM    *
- **************************************************************************/
-
 #include "ParticleSimulation.hpp"
 #include <math.h>
 #include <string.h>
 
-// ────────────────────────────────────────────────────
-//  工具：统计 → 流体类型
-// ────────────────────────────────────────────────────
-static inline FluidType classifyCell(int count, float avgSpeed) {
-  if (count < FLUID_PARTICLE_THRESHOLD)
+// ──────────────────────────────────────── 工具
+static inline FluidType classifyCell(int n, float v) {
+  if (n < FLUID_PARTICLE_THRESHOLD)
     return FLUID_EMPTY;
-  if (avgSpeed > FOAM_SPEED_THRESHOLD)
+  if (v > FOAM_SPEED_THRESHOLD)
     return FLUID_FOAM;
   return FLUID_LIQUID;
 }
 
-// ────────────────────────────────────────────────────
-//  初始化
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── 初始化
 void ParticleSimulation::begin(QMI8658C* imu) {
   m_imu = imu;
   m_numParticles = PC_MAX;
@@ -34,10 +21,11 @@ void ParticleSimulation::begin(QMI8658C* imu) {
 
 void ParticleSimulation::seedParticles() {
   for (int i = 0; i < m_numParticles; ++i) {
-    m_particles[i].x = random(2, GS - 2);
-    m_particles[i].y = random(2, GS - 2);
-    m_particles[i].vx = random(-50, 50) / 100.0f;
-    m_particles[i].vy = random(-50, 50) / 100.0f;
+    // 0.2 ~ 0.8 区域内随机
+    m_particles[i].x = random(20, 80) / 100.0f;
+    m_particles[i].y = random(20, 80) / 100.0f;
+    m_particles[i].vx = random(-50, 50) / 100.0f * CELL;  // 速度尺度≈单元
+    m_particles[i].vy = random(-50, 50) / 100.0f * CELL;
     m_particles[i].r = 0.2f;
     m_particles[i].g = 0.4f;
     m_particles[i].b = 1.0f;
@@ -47,131 +35,109 @@ void ParticleSimulation::seedParticles() {
 void ParticleSimulation::initGrid() {
   for (int i = 0; i < GC; ++i) {
     int gx = i / GS, gy = i % GS;
-    float cx = gx - GS * 0.5f + 0.5f;
-    float cy = gy - GS * 0.5f + 0.5f;
-    float rad = GS * 0.5f - 1.0f;  // 圆半径（减 1 做 margin）
+    float cx = (gx + 0.5f) * CELL - 0.5f,
+          cy = (gy + 0.5f) * CELL - 0.5f;  // 以(0,0)~(1,1)中心
+    float rad = 0.5f - CELL;               // 圆容器半径
     m_cellType[i] = (cx * cx + cy * cy <= rad * rad) ? FLUID_CELL : SOLID_CELL;
     m_s[i] = 1.0f;
-    m_u[i] = m_v[i] = m_prevU[i] = m_prevV[i] = 0.f;
-    m_du[i] = m_dv[i] = m_pressure[i] = 0.f;
   }
 }
 
-// ────────────────────────────────────────────────────
-//  对外 simulate(dt)
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── 主循环
 void ParticleSimulation::simulate(float dt) {
   updateIMU();
   integrateParticles(dt);
   pushParticlesApart(SEPARATE_ITERS_P);
-
-  transferVelocities(true, 0.0f);  // 粒子 → 网格 (纯 PIC)
+  transferVelocities(true, 0.0f);
   solveIncompressibility(SOLVER_ITERS_P, dt);
-  transferVelocities(false, FLIP_RATIO);  // 网格 → 粒子 (FLIP/PIC 混合)
-
-  updateFluidCells();  // 统计流体状态 & 变化表
+  transferVelocities(false, FLIP_RATIO);
+  updateFluidCells();
 }
 
-// ────────────────────────────────────────────────────
-//  IMU
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── IMU
 void ParticleSimulation::updateIMU() {
   if (!m_imu)
     return;
   float ax, ay, az;
   if (m_imu->readAccelerometer(&ax, &ay, &az)) {
-    m_ax = ay * 10.f;  // 根据实际感度缩放
-    m_ay = -ax * 10.f;
+    m_ax = ay * 10.f * CELL;  // 缩放到归一化空间
+    m_ay = -ax * 10.f * CELL;
   }
 }
 
-// ────────────────────────────────────────────────────
-//  粒子积分 & 圆形碰撞
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── 积分+碰撞
 void ParticleSimulation::integrateParticles(float dt) {
-  constexpr float CX = GS * 0.5f - 0.5f;  // 圆心
-  constexpr float CY = GS * 0.5f - 0.5f;
-  constexpr float R = GS * 0.5f - 1.0f - PARTICLE_RADIUS;  // 有效半径
-
+  constexpr float CX = 0.5f, CY = 0.5f, R = 0.5f - CELL - PARTICLE_RADIUS;
   for (int i = 0; i < m_numParticles; ++i) {
     Particle& p = m_particles[i];
-
-    // ── 外力积分 ──
     p.vx += m_ax * dt;
     p.vy += m_ay * dt;
     p.x += p.vx * dt;
     p.y += p.vy * dt;
 
-    // ── 边界盒 (确保坐标合法) ──
-    if (p.x < 0) {
-      p.x = 0;
-      p.vx = 0;
-    }
-    if (p.x > GS - 1) {
-      p.x = GS - 1;
-      p.vx = 0;
-    }
-    if (p.y < 0) {
-      p.y = 0;
-      p.vy = 0;
-    }
-    if (p.y > GS - 1) {
-      p.y = GS - 1;
-      p.vy = 0;
-    }
+    // 边界盒
+    p.x = clampF(p.x, PARTICLE_RADIUS, 1.0f - PARTICLE_RADIUS);
+    p.y = clampF(p.y, PARTICLE_RADIUS, 1.0f - PARTICLE_RADIUS);
 
-    // ── 圆形 SOLID_CELL 碰撞 ──
-    float dx = p.x - CX;
-    float dy = p.y - CY;
+    // 圆容器碰撞
+    float dx = p.x - CX, dy = p.y - CY;
     float d2 = dx * dx + dy * dy;
     if (d2 > R * R) {
+      // ---------- 推回圆内 ----------
       float d = sqrtf(d2);
       float inv = 1.0f / d;
-      float s = R * inv;  // 投回系数
-      p.x = CX + dx * s;
-      p.y = CY + dy * s;
+      float nx = dx * inv;  // 法向单位向量
+      float ny = dy * inv;
 
-      // 速度反射 (完全弹性)
-      float vn = (p.vx * dx + p.vy * dy) * inv;
-      p.vx -= 2.0f * vn * dx * inv;
-      p.vy -= 2.0f * vn * dy * inv;
+      float s = R - d;  // 穿透深度
+      p.x += nx * s;    // 直接平移回边界
+      p.y += ny * s;
+
+      // ---------- 速度分解 ----------
+      float vn = p.vx * nx + p.vy * ny;  // 法向分量
+      float vx_n = vn * nx;              // 法向速度向量
+      float vy_n = vn * ny;
+      float vx_t = p.vx - vx_n;  // 切向速度向量
+      float vy_t = p.vy - vy_n;
+
+      vx_n = -REST_N * vx_n;
+      vy_n = -REST_N * vy_n;
+      vx_t = (1.0f - FRIC_T) * vx_t;
+      vy_t = (1.0f - FRIC_T) * vy_t;
+
+      p.vx = vx_n + vx_t;
+      p.vy = vy_n + vy_t;
     }
   }
 }
 
-// ────────────────────────────────────────────────────
-//  Push-Apart（空间哈希）
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── Push-Apart
 void ParticleSimulation::pushParticlesApart(int iters) {
-  const float minDist2 = (2 * PARTICLE_RADIUS) * (2 * PARTICLE_RADIUS);
+  const float min2 = (2 * PARTICLE_RADIUS) * (2 * PARTICLE_RADIUS);
 
   memset(m_numPartCell, 0, sizeof(m_numPartCell));
   for (int i = 0; i < m_numParticles; ++i) {
-    int xi = (int)clampF(m_particles[i].x * P_INV_SP, 0, PNX - 1);
-    int yi = (int)clampF(m_particles[i].y * P_INV_SP, 0, PNY - 1);
+    int xi = clampF(m_particles[i].x * P_INV_SP, 0, PNX - 1);
+    int yi = clampF(m_particles[i].y * P_INV_SP, 0, PNY - 1);
     ++m_numPartCell[xi * PNY + yi];
   }
-  int prefix = 0;
+  int pref = 0;
   for (int i = 0; i < PNC; ++i) {
     int n = m_numPartCell[i];
-    m_firstPart[i] = prefix;
-    prefix += n;
+    m_firstPart[i] = pref;
+    pref += n;
   }
-  m_firstPart[PNC] = prefix;
-
+  m_firstPart[PNC] = pref;
   for (int i = 0; i < m_numParticles; ++i) {
-    int xi = (int)clampF(m_particles[i].x * P_INV_SP, 0, PNX - 1);
-    int yi = (int)clampF(m_particles[i].y * P_INV_SP, 0, PNY - 1);
-    int cell = xi * PNY + yi;
-    m_cellPartIds[--m_firstPart[cell]] = i;
+    int xi = clampF(m_particles[i].x * P_INV_SP, 0, PNX - 1);
+    int yi = clampF(m_particles[i].y * P_INV_SP, 0, PNY - 1);
+    m_cellPartIds[--m_firstPart[xi * PNY + yi]] = i;
   }
 
   for (int it = 0; it < iters; ++it) {
     for (int i = 0; i < m_numParticles; ++i) {
       Particle& a = m_particles[i];
-      int cx = (int)(a.x * P_INV_SP);
-      int cy = (int)(a.y * P_INV_SP);
-
+      int cx = a.x * P_INV_SP, cy = a.y * P_INV_SP;
       for (int xi = max(cx - 1, 0); xi <= min(cx + 1, PNX - 1); ++xi)
         for (int yi = max(cy - 1, 0); yi <= min(cy + 1, PNY - 1); ++yi) {
           int cell = xi * PNY + yi;
@@ -180,12 +146,10 @@ void ParticleSimulation::pushParticlesApart(int iters) {
             if (j <= i)
               continue;
             Particle& b = m_particles[j];
-            float dx = b.x - a.x, dy = b.y - a.y;
-            float d2 = dx * dx + dy * dy;
-            if (d2 > minDist2 || d2 == 0.f)
+            float dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy;
+            if (d2 > min2 || d2 == 0)
               continue;
-            float d = sqrtf(d2);
-            float s = 0.5f * (2 * PARTICLE_RADIUS - d) / d;
+            float d = sqrtf(d2), s = 0.5f * ((2 * PARTICLE_RADIUS) - d) / d;
             dx *= s;
             dy *= s;
             a.x -= dx;
@@ -198,12 +162,9 @@ void ParticleSimulation::pushParticlesApart(int iters) {
   }
 }
 
-// ────────────────────────────────────────────────────
-//  粒子 ↔ 网格 速度搬运 (简化版)
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── 速度搬运
 void ParticleSimulation::transferVelocities(bool toGrid, float flipRatio) {
-  const float hInv = 1.0f / H;
-
+  const float hInv = float(GS);  // 1/H
   if (toGrid) {
     memcpy(m_prevU, m_u, sizeof(m_u));
     memcpy(m_prevV, m_v, sizeof(m_v));
@@ -214,80 +175,65 @@ void ParticleSimulation::transferVelocities(bool toGrid, float flipRatio) {
   }
 
   for (int comp = 0; comp < 2; ++comp) {
-    float dx = comp == 0 ? 0.f : 0.5f;
-    float dy = comp == 0 ? 0.5f : 0.f;
-    float* f = comp == 0 ? m_u : m_v;
-    float* f_prev = comp == 0 ? m_prevU : m_prevV;
-    float* dwei = comp == 0 ? m_du : m_dv;
+    float dx = comp ? 0.5f * CELL : 0.0f;
+    float dy = comp ? 0.0f : 0.5f * CELL;
+    float *f = comp ? m_v : m_u, *fp = comp ? m_prevV : m_prevU,
+          *dw = comp ? m_dv : m_du;
 
     for (int p = 0; p < m_numParticles; ++p) {
       Particle& pr = m_particles[p];
-      float x = clampF(pr.x, 1, GS - 2);
-      float y = clampF(pr.y, 1, GS - 2);
-
-      float fx = (x - dx) * hInv;
-      float fy = (y - dy) * hInv;
-      int x0 = (int)fx, y0 = (int)fy;
-      float tx = fx - x0, ty = fy - y0;
-      int x1 = x0 + 1, y1 = y0 + 1;
-      float sx = 1.f - tx, sy = 1.f - ty;
-
+      float fx = (pr.x - dx) * hInv, fy = (pr.y - dy) * hInv;
+      int x0 = floorf(fx), y0 = floorf(fy);
+      float tx = fx - x0, ty = fy - y0, sx = 1 - tx, sy = 1 - ty;
+      int x1 = x0 + 1 < GS ? x0 + 1 : GS - 1,
+          y1 = y0 + 1 < GS ? y0 + 1 : GS - 1;
       float w0 = sx * sy, w1 = tx * sy, w2 = tx * ty, w3 = sx * ty;
       int n0 = idx(x0, y0), n1 = idx(x1, y0), n2 = idx(x1, y1),
           n3 = idx(x0, y1);
 
       if (toGrid) {
-        float pv = (comp == 0) ? pr.vx : pr.vy;
+        float pv = comp ? pr.vy : pr.vx;
         f[n0] += pv * w0;
-        dwei[n0] += w0;
+        dw[n0] += w0;
         f[n1] += pv * w1;
-        dwei[n1] += w1;
+        dw[n1] += w1;
         f[n2] += pv * w2;
-        dwei[n2] += w2;
+        dw[n2] += w2;
         f[n3] += pv * w3;
-        dwei[n3] += w3;
+        dw[n3] += w3;
       } else {
         float pic = w0 * f[n0] + w1 * f[n1] + w2 * f[n2] + w3 * f[n3];
-        float corr = w0 * (f[n0] - f_prev[n0]) + w1 * (f[n1] - f_prev[n1]) +
-                     w2 * (f[n2] - f_prev[n2]) + w3 * (f[n3] - f_prev[n3]);
-        float flip = (comp == 0 ? pr.vx : pr.vy) + corr;
-        float blend = (1.f - flipRatio) * pic + flipRatio * flip;
-        if (comp == 0)
-          pr.vx = blend;
+        float corr = w0 * (f[n0] - fp[n0]) + w1 * (f[n1] - fp[n1]) +
+                     w2 * (f[n2] - fp[n2]) + w3 * (f[n3] - fp[n3]);
+        float flip = (comp ? pr.vy : pr.vx) + corr;
+        float val = (1.f - flipRatio) * pic + flipRatio * flip;
+        if (comp)
+          pr.vy = val;
         else
-          pr.vy = blend;
+          pr.vx = val;
       }
     }
-
-    if (toGrid) {
+    if (toGrid)
       for (int i = 0; i < GC; ++i)
-        if (dwei[i] > 0.f)
-          f[i] /= dwei[i];
-    }
+        if (dw[i] > 0)
+          f[i] /= dw[i];
   }
 }
 
-// ────────────────────────────────────────────────────
-//  压力求解 (简化 Jacobi / Gauss-Seidel)
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── 压力求解
 void ParticleSimulation::solveIncompressibility(int iters, float dt) {
-  const float cp = FLUID_DENSITY * H / dt;
-
-  for (int it = 0; it < iters; ++it) {
+  const float cp = FLUID_DENSITY * CELL / dt;
+  for (int k = 0; k < iters; ++k) {
     for (int gx = 1; gx < GS - 1; ++gx)
       for (int gy = 1; gy < GS - 1; ++gy) {
         int c = idx(gx, gy);
         if (m_cellType[c] != FLUID_CELL)
           continue;
-
         int l = idx(gx - 1, gy), r = idx(gx + 1, gy), b = idx(gx, gy - 1),
             t = idx(gx, gy + 1);
-
         float div = m_u[r] - m_u[c] + m_v[t] - m_v[c];
-        float p = -div / 4.f;  // 邻居权重均为 1
-        p *= 1.9f;             // 过松弛
+        float p = -div / 4.f * 1.9f;
         m_pressure[c] += cp * p;
-
         m_u[c] -= p;
         m_u[r] += p;
         m_v[c] -= p;
@@ -296,32 +242,81 @@ void ParticleSimulation::solveIncompressibility(int iters, float dt) {
   }
 }
 
-// ────────────────────────────────────────────────────
-//  更新流体状态 & 变化表
-// ────────────────────────────────────────────────────
+// ──────────────────────────────────────── 状态统计
+// ──────────────────────────────────────── 状态统计
+// ──────────────────────────────────────── 状态统计（含去抖 + RIM 判定）
 void ParticleSimulation::updateFluidCells() {
+  /* —— 0. 备份前帧状态 —— */
   memcpy(m_prevFluid, m_currFluid, sizeof(m_currFluid));
 
-  static uint16_t cnt[GC];
-  static float acc[GC];
+  /* ---------- 1. 统计每格粒子数量 & 平均速度 ---------- */
+  static uint16_t cnt[GC];  // 颗粒计数
+  static float acc[GC];     // 速度累加
   memset(cnt, 0, sizeof(cnt));
   memset(acc, 0, sizeof(acc));
 
   for (int i = 0; i < m_numParticles; ++i) {
-    int gx = (int)clampF(floorf(m_particles[i].x), 0, GS - 1);
-    int gy = (int)clampF(floorf(m_particles[i].y), 0, GS - 1);
+    int gx = clampF(int(m_particles[i].x * GS), 0, GS - 1);
+    int gy = clampF(int(m_particles[i].y * GS), 0, GS - 1);
     int id = idx(gx, gy);
-    float speed = sqrtf(m_particles[i].vx * m_particles[i].vx +
-                        m_particles[i].vy * m_particles[i].vy);
     ++cnt[id];
-    acc[id] += speed;
+    acc[id] += hypotf(m_particles[i].vx, m_particles[i].vy);
   }
 
+  /* ---------- 2. 初步分类 ---------- */
+  for (int id = 0; id < GC; ++id) {
+    const int n = cnt[id];
+    const float v = n ? acc[id] / n : 0.f;
+
+    if (n >= FLUID_PARTICLE_THRESHOLD) {
+      m_currFluid[id] = (v > FOAM_SPEED_THRESHOLD) ? FLUID_FOAM : FLUID_LIQUID;
+    } else if (n >= FLUID_RIM_PARTICLE_THRESHOLD) {
+      m_currFluid[id] = FLUID_RIM;  // 稀薄边缘水
+    } else {
+      m_currFluid[id] = FLUID_EMPTY;
+    }
+  }
+
+  /* ---------- 3. 去抖：若周围 ≥3 格“已填满”则本格提升为 RIM ---------- */
+  FluidType debounced[GC];
+  memcpy(debounced, m_currFluid, sizeof(m_currFluid));
+
+  auto filled = [&](int id) -> bool {  // 判定“已填满”
+    return (m_cellType[id] == SOLID_CELL) ||
+           (m_currFluid[id] == FLUID_LIQUID) ||
+           (m_currFluid[id] == FLUID_RIM) || (m_currFluid[id] == FLUID_FOAM);
+  };
+
+  for (int gx = 0; gx < GS; ++gx) {
+    for (int gy = 0; gy < GS; ++gy) {
+      int id = idx(gx, gy);
+      if (debounced[id] != FLUID_EMPTY)
+        continue;  // 本来就有水
+
+      int filledNbr = 0;
+      for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy) {
+          if (!dx && !dy)
+            continue;
+          int nx = gx + dx, ny = gy + dy;
+          if (nx < 0 || nx >= GS || ny < 0 || ny >= GS)
+            continue;
+          if (filled(idx(nx, ny)))
+            ++filledNbr;
+        }
+
+      if (filledNbr >= 5)  // 去抖阈值 = 3
+        debounced[id] = FLUID_RIM;
+      if (filledNbr >= 7)  // 去抖阈值 = 3
+        debounced[id] = FLUID_LIQUID;
+    }
+  }
+
+  /* ---------- 4. 写回结果 & 生成变化列表 ---------- */
   m_changedCnt = 0;
-  for (int i = 0; i < GC; ++i) {
-    float avg = cnt[i] ? acc[i] / cnt[i] : 0.f;
-    m_currFluid[i] = classifyCell(cnt[i], avg);
-    if (m_currFluid[i] != m_prevFluid[i])
-      m_changedIdx[m_changedCnt++] = i;
+  for (int id = 0; id < GC; ++id) {
+    m_currFluid[id] = debounced[id];
+    if (m_currFluid[id] != m_prevFluid[id])
+      m_changedIdx[m_changedCnt++] = id;
   }
 }
