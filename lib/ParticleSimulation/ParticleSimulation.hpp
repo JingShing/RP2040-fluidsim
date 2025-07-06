@@ -7,7 +7,7 @@
 #include "qmi8658c.hpp"
 
 // ─── 宏与常量 ─────────────────────────────────────
-#define LOGICAL_GRID_SIZE 48  // GS
+#define LOGICAL_GRID_SIZE 16  // GS
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 240
 #define PIXEL_PER_CELL (SCREEN_WIDTH / LOGICAL_GRID_SIZE)
@@ -16,11 +16,11 @@
 #define FLUID_RIM_PARTICLE_THRESHOLD 1
 #define FOAM_SPEED_THRESHOLD 999.0f / LOGICAL_GRID_SIZE
 #define NUM_PARTICLES 100
-#define PARTICLE_RADIUS 1.5f / LOGICAL_GRID_SIZE  // 归一化单位；≈ 单元半径一半
+#define PARTICLE_RADIUS 0.65f / LOGICAL_GRID_SIZE  // 归一化单位；≈ 单元半径一半
 #define FLUID_DENSITY 1.0f
 #define SOLVER_ITERS_P 1
 #define SEPARATE_ITERS_P 1
-#define FLIP_RATIO 0.3f
+#define FLIP_RATIO 0.6f
 
 #define REST_N 0.05f
 #define FRIC_T 0.05f

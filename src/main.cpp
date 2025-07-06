@@ -16,7 +16,7 @@ static unsigned long lastFrameTime = 0;
 static constexpr float TARGET_FPS = 30.0f;
 static constexpr float FRAME_TIME_MS = 1000.0f / TARGET_FPS;
 static constexpr float FIXED_DT = 1.0f / TARGET_FPS;
-static constexpr float TIME_MULTIPLIER = 5.0f;
+static constexpr float TIME_MULTIPLIER = 10.0f;
 
 // ─────────────── 统计计时器 ───────────────
 static unsigned long physAccumUs = 0;

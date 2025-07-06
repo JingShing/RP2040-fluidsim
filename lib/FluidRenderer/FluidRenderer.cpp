@@ -1,5 +1,12 @@
 #include "FluidRenderer.hpp"
 
+// 配置参数（可调整以适应不同的渲染效果）
+#define RENDER_PARTICLE_THRESHOLD 3      // 粒子数阈值：液体（每个逻辑格子）
+#define RENDER_RIM_PARTICLE_THRESHOLD 1  // 粒子数阈值：边缘透明（每个逻辑格子）
+#define RENDER_RIM_LIGHT_WIDTH 1         // 老代码：光晕向外扩张曼哈顿半径
+#define RENDER_EDGE_SMOOTH_RADIUS 3      // ★ 新增：closing 卷积半径 (≥1)
+#define RENDER_FOAM_SPEED_THRESHOLD 99.0f  // 泡沫速度阈值
+
 // 16-bit 565 颜色线性插值
 uint16_t FluidRenderer::lerp565(uint16_t c1, uint16_t c2, float t) const {
   // clamp t to [0,1]
@@ -23,6 +30,203 @@ uint16_t FluidRenderer::lerp565(uint16_t c1, uint16_t c2, float t) const {
   return (r << 11) | (g << 5) | b;
 }
 
+// 获取流体类型对应的颜色
+uint16_t FluidRenderer::getFluidColor(RenderFluidType type) const {
+  switch (type) {
+    case RENDER_FLUID_LIQUID:
+      return m_disp->color565(0, 240, 255);
+    case RENDER_FLUID_FOAM:
+      return m_disp->color565(200, 200, 230);
+    case RENDER_FLUID_RIM_TRANSPARENT:
+      return m_disp->color565(0, 120, 255);
+    case RENDER_FLUID_RIM_LIGHT:
+      return m_disp->color565(0, 10, 230);
+    default:  // RENDER_FLUID_EMPTY
+      return m_disp->color565(0, 0, 0);
+  }
+}
+
+// 检查模拟网格中的固体单元（坐标转换）
+// ─────────────────────────────────────────────
+// 根据圆形容器方程判断渲染网格单元是否为 Solid
+// 与模拟端 initGrid() 使用同一半径：rad = 0.5 - CELL
+// ─────────────────────────────────────────────
+bool FluidRenderer::isSimSolid(int renderGx, int renderGy) const {
+  // 渲染网格单元中心在 [0,1] 归一化坐标系中的位置
+  const float cell = 1.0f / m_renderGridSize;        // 渲染网格单元尺寸
+  const float cx = (renderGx + 0.5f) * cell - 0.5f;  // 相对圆心 x
+  const float cy = (renderGy + 0.5f) * cell - 0.5f;  // 相对圆心 y
+
+  // 与模拟端一致的圆容器半径（使用模拟 CELL，保持几何一致性）
+  constexpr float rad = 0.5f - ParticleSimulation::CELL;
+
+  // 圆外 ⇒ Solid
+  return (cx * cx + cy * cy) > (rad * rad);
+}
+
+/******************************************************************
+ * FluidRenderer::updateFluidCells() -- 卷积-Closing 平滑液面边缘
+ *   ① 统计半径覆盖 → 基础分类
+ *   ② 形态学 closing(膨胀→腐蚀)  → 填平凹洞 / 削细尖
+ *   ③ 新生成的填充格设为 RENDER_FLUID_RIM_LIGHT
+ ******************************************************************/
+
+void FluidRenderer::updateFluidCells() {
+  const int GS = m_renderGridSize;
+  const int GC = GS * GS;
+  const float CELL = 1.0f / GS;
+
+  /* 0️⃣ 备份上一帧状态 */
+  memcpy(m_prevFluid, m_currFluid, GC * sizeof(RenderFluidType));
+
+  /* 1️⃣ 统计粒子覆盖半径：cnt[] / acc[] ------------------------- */
+  static uint16_t cnt[MAX_GRID_CELLS];
+  static float acc[MAX_GRID_CELLS];
+  memset(cnt, 0, GC * sizeof(uint16_t));
+  memset(acc, 0, GC * sizeof(float));
+
+  const float r = PARTICLE_RADIUS;  // 归一化半径
+  const float r2 = r * r;
+
+  const Particle* P = m_sim->data();
+  const int N = m_sim->particleCount();
+
+  for (int p = 0; p < N; ++p) {
+    const float px = P[p].x, py = P[p].y;
+    const float sp = hypotf(P[p].vx, P[p].vy);
+
+    int gx0 = constrain(int((px - r) * GS), 0, GS - 1);
+    int gy0 = constrain(int((py - r) * GS), 0, GS - 1);
+    int gx1 = constrain(int((px + r) * GS), 0, GS - 1);
+    int gy1 = constrain(int((py + r) * GS), 0, GS - 1);
+
+    for (int gx = gx0; gx <= gx1; ++gx)
+      for (int gy = gy0; gy <= gy1; ++gy) {
+        float cx = (gx + 0.5f) * CELL;
+        float cy = (gy + 0.5f) * CELL;
+        float dx = cx - px, dy = cy - py;
+        if (dx * dx + dy * dy > r2)
+          continue;
+
+        int id = idx(gx, gy);
+        ++cnt[id];
+        acc[id] += sp;
+      }
+  }
+
+  /* 2️⃣ 基础分类 (Liquid / RimTransparent / Empty / Foam) -------- */
+  for (int id = 0; id < GC; ++id) {
+    const float n = cnt[id];
+    const float v = n ? acc[id] / n : 0.f;
+
+    if (n >= RENDER_PARTICLE_THRESHOLD)
+      m_currFluid[id] = (v > RENDER_FOAM_SPEED_THRESHOLD) ? RENDER_FLUID_FOAM
+                                                          : RENDER_FLUID_LIQUID;
+    else if (n >= RENDER_RIM_PARTICLE_THRESHOLD)
+      m_currFluid[id] = RENDER_FLUID_RIM_TRANSPARENT;
+    else
+      m_currFluid[id] = RENDER_FLUID_EMPTY;
+  }
+
+  /* 3️⃣ 原有「邻域包边」卷积：EMPTY → Rim* ------------------------ */
+  memcpy(m_convTmp, m_currFluid, GC * sizeof(RenderFluidType));
+
+  auto neighborFilled = [&](int id) -> bool {
+    return (m_currFluid[id] == RENDER_FLUID_RIM_TRANSPARENT) ||
+           (m_currFluid[id] == RENDER_FLUID_LIQUID) ||
+           (m_currFluid[id] == RENDER_FLUID_FOAM);
+  };
+
+  for (int gx = 0; gx < GS; ++gx)
+    for (int gy = 0; gy < GS; ++gy) {
+      int id = idx(gx, gy);
+      if (m_currFluid[id] != RENDER_FLUID_EMPTY)
+        continue;
+
+      int touch = 0;
+      for (int dx = -1; dx <= 1 && touch < 4; ++dx)
+        for (int dy = -1; dy <= 1 && touch < 4; ++dy) {
+          if (!dx && !dy)
+            continue;  // 自身
+          if (dx && dy)
+            continue;  // 只看 4 邻域
+          int nx = gx + dx, ny = gy + dy;
+          if (nx < 0 || nx >= GS || ny < 0 || ny >= GS)
+            continue;
+          if (neighborFilled(idx(nx, ny)))
+            ++touch;
+        }
+
+      if (touch >= 4)
+        m_convTmp[id] = RENDER_FLUID_LIQUID;
+      else if (touch >= 2)
+        m_convTmp[id] = RENDER_FLUID_RIM_TRANSPARENT;
+      else if (touch >= 1)
+        m_convTmp[id] = RENDER_FLUID_RIM_LIGHT;
+    }
+
+  /* --- 把包边结果写回作为 closing 的初始基准 -------------------- */
+  memcpy(m_currFluid, m_convTmp, GC * sizeof(RenderFluidType));
+
+  /* 4️⃣ Closing(膨胀→腐蚀) 平滑液面 ------------------------------ */
+  const int R = RENDER_EDGE_SMOOTH_RADIUS;  // 卷积半径
+
+  static uint8_t mask[MAX_GRID_CELLS];
+  static uint8_t dilate[MAX_GRID_CELLS];
+  static uint8_t close[MAX_GRID_CELLS];
+
+  /* 4-A 生成二值掩码（液面/泡沫/透明边缘 = 1） */
+  for (int i = 0; i < GC; ++i)
+    mask[i] = (m_currFluid[i] == RENDER_FLUID_LIQUID ||
+               m_currFluid[i] == RENDER_FLUID_FOAM ||
+               m_currFluid[i] == RENDER_FLUID_RIM_TRANSPARENT)
+                  ? 1
+                  : 0;
+
+  /* 4-B 膨胀 dilation */
+  memset(dilate, 0, GC);
+  for (int gx = 0; gx < GS; ++gx)
+    for (int gy = 0; gy < GS; ++gy) {
+      if (!mask[idx(gx, gy)])
+        continue;
+      for (int dx = -R; dx <= R; ++dx)
+        for (int dy = -R; dy <= R; ++dy) {
+          if (abs(dx) + abs(dy) > R)
+            continue;  // 曼哈顿邻域
+          int nx = gx + dx, ny = gy + dy;
+          if (nx < 0 || nx >= GS || ny < 0 || ny >= GS)
+            continue;
+          dilate[idx(nx, ny)] = 1;
+        }
+    }
+
+  /* 4-C 腐蚀 erosion */
+  memset(close, 0, GC);
+  for (int gx = 0; gx < GS; ++gx)
+    for (int gy = 0; gy < GS; ++gy) {
+      bool all = true;
+      for (int dx = -R; dx <= R && all; ++dx)
+        for (int dy = -R; dy <= R && all; ++dy) {
+          if (abs(dx) + abs(dy) > R)
+            continue;
+          int nx = gx + dx, ny = gy + dy;
+          if (nx < 0 || nx >= GS || ny < 0 || ny >= GS || !dilate[idx(nx, ny)])
+            all = false;
+        }
+      close[idx(gx, gy)] = all ? 1 : 0;
+    }
+
+  /* 4-D 新填补的 EMPTY → RIM_LIGHT */
+  for (int i = 0; i < GC; ++i)
+    if (close[i] && !mask[i] && m_currFluid[i] == RENDER_FLUID_EMPTY)
+      m_currFluid[i] = RENDER_FLUID_RIM_LIGHT;
+
+  /* 5️⃣ 生成变化列表 --------------------------------------------- */
+  m_changedCnt = 0;
+  for (int i = 0; i < GC; ++i)
+    if (m_currFluid[i] != m_prevFluid[i])
+      m_changedIdx[m_changedCnt++] = i;
+}
 // ------------------ 公共接口 ------------------
 
 void FluidRenderer::render(Mode mode) {
@@ -35,6 +239,8 @@ void FluidRenderer::render(Mode mode) {
       renderGrid();
       break;
     case PARTIAL_GRID:
+      // 先更新状态，再渲染变化部分
+      updateFluidCells();
       renderPartialGrid();
       break;
   }
@@ -51,11 +257,11 @@ void FluidRenderer::renderBalls() {
   // 3. 画每个粒子
   const Particle* P = m_sim->data();
   const int N = m_sim->particleCount();
-  const int radius = (int)(PIXEL_PER_CELL * PARTICLE_RADIUS);
+  const int radius = (int)(m_renderCellSize * PARTICLE_RADIUS);
 
   for (int i = 0; i < N; ++i) {
-    int sx = (int)(P[i].x * PIXEL_PER_CELL);
-    int sy = (int)(P[i].y * PIXEL_PER_CELL);
+    int sx = (int)(P[i].x * SCREEN_WIDTH);
+    int sy = (int)(P[i].y * SCREEN_HEIGHT);
 
     // 速度映射到颜色
     float speed = sqrtf(P[i].vx * P[i].vx + P[i].vy * P[i].vy);
@@ -68,102 +274,61 @@ void FluidRenderer::renderBalls() {
 }
 
 void FluidRenderer::renderGrid() {
-  // 0. 颜色表（可再做成成员变量）
-  const uint16_t emptyCol = m_disp->color565(0, 0, 0);        // 深蓝：空气
-  const uint16_t liquidCol = m_disp->color565(30, 30, 230);   // 现有液体色
-  const uint16_t liquidRimCol = m_disp->color565(0, 0, 120);  // 现有液体色
-  const uint16_t foamCol = m_disp->color565(200, 200, 230);   // 近白：泡沫
+  // 1. 先更新状态
+  updateFluidCells();
 
-  // 1. 先清屏
-  m_disp->fillScreen(emptyCol);
+  // 2. 先清屏
+  m_disp->fillScreen(m_disp->color565(0, 0, 0));
 
-  // 2. 逐格绘制
-  for (int gx = 0; gx < LOGICAL_GRID_SIZE; ++gx) {
-    for (int gy = 0; gy < LOGICAL_GRID_SIZE; ++gy) {
-      int px = gx * PIXEL_PER_CELL;
-      int py = gy * PIXEL_PER_CELL;
+  // 3. 逐格绘制
+  for (int gx = 0; gx < m_renderGridSize; ++gx) {
+    for (int gy = 0; gy < m_renderGridSize; ++gy) {
+      int px = gx * m_renderCellSize;
+      int py = gy * m_renderCellSize;
 
       uint16_t color;
 
-      if (m_sim->isSolid(gx, gy)) {
+      if (isSimSolid(gx, gy)) {
         color = m_gridSolid;  // 墙
       } else {
         // 读取当前帧流体状态
-        FluidType ft = m_sim->m_currFluid[gx * LOGICAL_GRID_SIZE + gy];
-        switch (ft) {
-          case FLUID_LIQUID:
-            color = liquidCol;
-            break;
-          case FLUID_FOAM:
-            color = foamCol;
-            break;
-          case FLUID_RIM_TRANSPARENT:
-            color = liquidRimCol;
-            break;
-          default:
-            color = emptyCol;
-            break;  // FLUID_EMPTY
-        }
+        RenderFluidType ft = m_currFluid[idx(gx, gy)];
+        color = getFluidColor(ft);
       }
 
-      m_disp->fillRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL, color);
+      m_disp->fillRect(px, py, m_renderCellSize, m_renderCellSize, color);
 
       // （可选）描边
-      m_disp->drawRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL,
+      m_disp->drawRect(px, py, m_renderCellSize, m_renderCellSize,
                        m_disp->color565(10, 10, 20));
     }
   }
 }
 
 void FluidRenderer::renderPartialGrid() {
-  // 0. 颜色表（可再做成成员变量）
-  const uint16_t emptyCol = m_disp->color565(0, 0, 0);  // 深蓝：空气
-  const uint16_t liquidLightRimCol =
-      m_disp->color565(0, 10, 230);                            // 现有液体色
-  const uint16_t liquidRimCol = m_disp->color565(0, 120, 255);  // 现有液体色
-  const uint16_t foamCol = m_disp->color565(200, 200, 230);     // 近白：泡沫
-  const uint16_t liquidCol = m_disp->color565(0, 240, 255);
-  const int* ids = m_sim->changedIndices();
-  const int cnt = m_sim->changedCount();
+  // 注意：updateFluidCells() 已在 render() 中调用
 
   // 统计并打印
-  // Serial.printf("Changed cells this frame: %d\n", cnt);
+  // Serial.printf("Changed cells this frame: %d\n", m_changedCnt);
 
-  for (int n = 0; n < cnt; ++n) {
-    int idx = ids[n];
-    int gx = idx / LOGICAL_GRID_SIZE;
-    int gy = idx % LOGICAL_GRID_SIZE;
+  for (int n = 0; n < m_changedCnt; ++n) {
+    int idx = m_changedIdx[n];
+    int gx = idx / m_renderGridSize;
+    int gy = idx % m_renderGridSize;
 
-    if (m_sim->isSolid(gx, gy))
+    if (isSimSolid(gx, gy))
       continue;  // 固体不用重画
 
     // 像素坐标
-    int px = gx * PIXEL_PER_CELL;
-    int py = gy * PIXEL_PER_CELL;
+    int px = gx * m_renderCellSize;
+    int py = gy * m_renderCellSize;
 
     // 颜色
-    uint16_t color;
-    switch (m_sim->m_currFluid[idx]) {
-      case FLUID_LIQUID:
-        color = liquidCol;
-        break;
-      case FLUID_FOAM:
-        color = foamCol;
-        break;
-      case FLUID_RIM_TRANSPARENT:
-        color = liquidRimCol;
-        break;
-      case FLUID_RIM_LIGHT:
-        color = liquidLightRimCol;
-        break;
-      default:
-        color = emptyCol;
-        break;  // FLUID_EMPTY
-    }
+    uint16_t color = getFluidColor(m_currFluid[idx]);
 
     // 绘制
-    m_disp->fillRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL, color);
-    m_disp->drawRect(px, py, PIXEL_PER_CELL, PIXEL_PER_CELL,
+    m_disp->fillRect(px, py, m_renderCellSize, m_renderCellSize, color);
+    m_disp->drawRect(px, py, m_renderCellSize, m_renderCellSize,
                      m_disp->color565(10, 10, 20));
   }
 }
