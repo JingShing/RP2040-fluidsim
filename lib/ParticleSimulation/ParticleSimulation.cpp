@@ -115,8 +115,8 @@ void ParticleSimulation::updateIMU() {
     return;
   float ax, ay, az;
   if (m_imu->readAccelerometer(&ax, &ay, &az)) {
-    m_ax = ay * 10.f * CELL;  // 缩放到归一化空间
-    m_ay = -ax * 10.f * CELL;
+    m_ax = ay * 10.f * GRAVITY_MODIFIER;  // 缩放到归一化空间
+    m_ay = -ax * 10.f * GRAVITY_MODIFIER;
   }
 }
 

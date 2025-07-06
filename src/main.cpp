@@ -16,7 +16,7 @@ static unsigned long lastFrameTime = 0;
 static constexpr float TARGET_FPS = 30.0f;
 static constexpr float FRAME_TIME_MS = 1000.0f / TARGET_FPS;
 static constexpr float FIXED_DT = 1.0f / TARGET_FPS;
-static constexpr float TIME_MULTIPLIER = 10.0f;
+static constexpr float TIME_MULTIPLIER = 1.0f;
 
 // ─────────────── 统计计时器 ───────────────
 static unsigned long physAccumUs = 0;
@@ -64,8 +64,8 @@ void loop() {
   float deltaTime = (nowMs - lastFrameTime) * 0.001f;
 
   // ----------- 固定步长物理 -----------
-  float time_dt = min(FIXED_DT * TIME_MULTIPLIER, 0.1f);
-
+  float time_dt = min(FIXED_DT * TIME_MULTIPLIER, 1.0f);
+  time_dt = FIXED_DT * TIME_MULTIPLIER;
   // while (acc >= FIXED_DT) {
   unsigned long t0 = micros();
   sim.simulate(time_dt);
@@ -99,11 +99,11 @@ void loop() {
   ++frameCounter;
 
   // ----------- 每秒串口打印统计 -----------
-  if (nowMs - lastPrintMs >= 1000) {
-    Serial.printf("[FPS %3u] Physics: %.2f ms  |  Render: %.2f ms\r\n",
-                  frameCounter, physAccumUs * 0.001f, rendAccumUs * 0.001f);
-    physAccumUs = rendAccumUs = 0;
-    frameCounter = 0;
-    lastPrintMs = nowMs;
-  }
+  // if (nowMs - lastPrintMs >= 1000) {
+  //   Serial.printf("[FPS %3u] Physics: %.2f ms  |  Render: %.2f ms\r\n",
+  //                 frameCounter, physAccumUs * 0.001f, rendAccumUs * 0.001f);
+  physAccumUs = rendAccumUs = 0;
+  frameCounter = 0;
+  lastPrintMs = nowMs;
+}
 }
