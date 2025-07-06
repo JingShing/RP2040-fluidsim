@@ -4,7 +4,7 @@
 
 class FluidRenderer {
  public:
-  enum Mode { BALLS, GRID, PARTIAL_GRID };  // ← 新枚举
+  enum Mode { BALLS, GRID, PARTIAL_GRID, PARTIAL_BALLS };  // ← 新枚举
 
   FluidRenderer(lgfx::LGFX_Device* disp, const ParticleSimulation* sim)
       : m_disp(disp), m_sim(sim) {}

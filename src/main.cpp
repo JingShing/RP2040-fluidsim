@@ -100,8 +100,8 @@ void loop() {
 
   // ----------- 每秒串口打印统计 -----------
   if (nowMs - lastPrintMs >= 1000) {
-    // Serial.printf("[FPS %3u] Physics: %.2f ms  |  Render: %.2f ms\r\n",
-    //               frameCounter, physAccumUs * 0.001f, rendAccumUs * 0.001f);
+    Serial.printf("[FPS %3u] Physics: %.2f ms  |  Render: %.2f ms\r\n",
+                  frameCounter, physAccumUs * 0.001f, rendAccumUs * 0.001f);
     physAccumUs = rendAccumUs = 0;
     frameCounter = 0;
     lastPrintMs = nowMs;

@@ -97,7 +97,7 @@ void FluidRenderer::renderGrid() {
           case FLUID_FOAM:
             color = foamCol;
             break;
-          case FLUID_RIM:
+          case FLUID_RIM_TRANSPARENT:
             color = liquidRimCol;
             break;
           default:
@@ -117,11 +117,12 @@ void FluidRenderer::renderGrid() {
 
 void FluidRenderer::renderPartialGrid() {
   // 0. 颜色表（可再做成成员变量）
-  const uint16_t emptyCol = m_disp->color565(0, 0, 0);        // 深蓝：空气
-  const uint16_t liquidCol = m_disp->color565(30, 30, 230);   // 现有液体色
-  const uint16_t liquidRimCol = m_disp->color565(0, 0, 120);  // 现有液体色
-  const uint16_t foamCol = m_disp->color565(200, 200, 230);   // 近白：泡沫
-
+  const uint16_t emptyCol = m_disp->color565(0, 0, 0);  // 深蓝：空气
+  const uint16_t liquidLightRimCol =
+      m_disp->color565(0, 10, 230);                            // 现有液体色
+  const uint16_t liquidRimCol = m_disp->color565(0, 120, 255);  // 现有液体色
+  const uint16_t foamCol = m_disp->color565(200, 200, 230);     // 近白：泡沫
+  const uint16_t liquidCol = m_disp->color565(0, 240, 255);
   const int* ids = m_sim->changedIndices();
   const int cnt = m_sim->changedCount();
 
@@ -149,8 +150,11 @@ void FluidRenderer::renderPartialGrid() {
       case FLUID_FOAM:
         color = foamCol;
         break;
-      case FLUID_RIM:
+      case FLUID_RIM_TRANSPARENT:
         color = liquidRimCol;
+        break;
+      case FLUID_RIM_LIGHT:
+        color = liquidLightRimCol;
         break;
       default:
         color = emptyCol;

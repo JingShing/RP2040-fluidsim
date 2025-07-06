@@ -7,28 +7,33 @@
 #include "qmi8658c.hpp"
 
 // ─── 宏与常量 ─────────────────────────────────────
-#define LOGICAL_GRID_SIZE 20  // GS
+#define LOGICAL_GRID_SIZE 48  // GS
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 240
 #define PIXEL_PER_CELL (SCREEN_WIDTH / LOGICAL_GRID_SIZE)
 
-#define FLUID_PARTICLE_THRESHOLD 2
+#define FLUID_PARTICLE_THRESHOLD 3
 #define FLUID_RIM_PARTICLE_THRESHOLD 1
-#define FOAM_SPEED_THRESHOLD 10.0f / LOGICAL_GRID_SIZE
-
-#define NUM_PARTICLES 200
-#define PARTICLE_RADIUS 0.45f / LOGICAL_GRID_SIZE  // 归一化单位；≈ 单元半径一半
+#define FOAM_SPEED_THRESHOLD 999.0f / LOGICAL_GRID_SIZE
+#define NUM_PARTICLES 100
+#define PARTICLE_RADIUS 1.5f / LOGICAL_GRID_SIZE  // 归一化单位；≈ 单元半径一半
 #define FLUID_DENSITY 1.0f
-#define SOLVER_ITERS_P 4
-#define SEPARATE_ITERS_P 2
-#define FLIP_RATIO 0.55f
+#define SOLVER_ITERS_P 1
+#define SEPARATE_ITERS_P 1
+#define FLIP_RATIO 0.3f
 
 #define REST_N 0.05f
 #define FRIC_T 0.05f
 
 // ─── 枚举 ─────────────────────────────────────────
 enum CellType : uint8_t { FLUID_CELL, AIR_CELL, SOLID_CELL };
-enum FluidType : uint8_t { FLUID_EMPTY, FLUID_LIQUID, FLUID_RIM, FLUID_FOAM };
+enum FluidType : uint8_t {
+  FLUID_EMPTY,
+  FLUID_LIQUID,
+  FLUID_RIM_TRANSPARENT,
+  FLUID_FOAM,
+  FLUID_RIM_LIGHT
+};
 
 // ─── 结构 ─────────────────────────────────────────
 struct Particle {
@@ -62,6 +67,7 @@ class ParticleSimulation {
   // 公开流体面板
   FluidType m_currFluid[GC]{};
   FluidType m_prevFluid[GC]{};
+  FluidType convTmp[GC];
 
  private:
   // ── 网格字段 ───────────────────────────────

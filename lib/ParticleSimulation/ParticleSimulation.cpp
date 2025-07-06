@@ -45,13 +45,68 @@ void ParticleSimulation::initGrid() {
 
 // ──────────────────────────────────────── 主循环
 void ParticleSimulation::simulate(float dt) {
+  /* ───── 计时用变量 ─────────────────── */
+  static uint32_t accIMU = 0;
+  static uint32_t accIntg = 0;
+  static uint32_t accPush = 0;
+  static uint32_t accTvG = 0;  // transfer → grid
+  static uint32_t accSolve = 0;
+  static uint32_t accTvP = 0;  // transfer → particle
+  static uint32_t accStat = 0;
+  static uint32_t frames = 0;
+  static uint32_t tLastPrint = millis();
+
+  /* ───── 阶段 1：IMU ─────────────────── */
+  uint32_t t0 = micros();
   updateIMU();
+  uint32_t t1 = micros();
+
+  /* ───── 阶段 2：积分 & 碰撞 ──────────── */
   integrateParticles(dt);
+  uint32_t t2 = micros();
+
+  /* ───── 阶段 3：粒子推开  ─────────────── */
   pushParticlesApart(SEPARATE_ITERS_P);
+  uint32_t t3 = micros();
+
+  /* ───── 阶段 4：粒子 → 网格 (PIC) ─────── */
   transferVelocities(true, 0.0f);
+  uint32_t t4 = micros();
+
+  /* ───── 阶段 5：压力求解 ──────────────── */
   solveIncompressibility(SOLVER_ITERS_P, dt);
+  uint32_t t5 = micros();
+
+  /* ───── 阶段 6：网格 → 粒子 (FLIP/PIC) ─ */
   transferVelocities(false, FLIP_RATIO);
+  uint32_t t6 = micros();
+
+  /* ───── 阶段 7：统计/卷积 ─────────────── */
   updateFluidCells();
+  uint32_t t7 = micros();
+
+  /* ───── 累加 ─────────────────────────── */
+  accIMU += t1 - t0;
+  accIntg += t2 - t1;
+  accPush += t3 - t2;
+  accTvG += t4 - t3;
+  accSolve += t5 - t4;
+  accTvP += t6 - t5;
+  accStat += t7 - t6;
+  ++frames;
+
+  /* ───── 每秒打印一次 ─────────────────── */
+  if (millis() - tLastPrint >= 1000) {
+    Serial.printf(
+        "[%3u fps]  IMU:%4lu  Intg:%4lu  Push:%4lu  ToG:%4lu  Solve:%4lu  "
+        "ToP:%4lu  Stat:%4lu (µs per frame)\r\n",
+        frames, accIMU / frames, accIntg / frames, accPush / frames,
+        accTvG / frames, accSolve / frames, accTvP / frames, accStat / frames);
+    /* 清零 */
+    accIMU = accIntg = accPush = accTvG = accSolve = accTvP = accStat = 0;
+    frames = 0;
+    tLastPrint = millis();
+  }
 }
 
 // ──────────────────────────────────────── IMU
@@ -243,80 +298,108 @@ void ParticleSimulation::solveIncompressibility(int iters, float dt) {
 }
 
 // ──────────────────────────────────────── 状态统计
-// ──────────────────────────────────────── 状态统计
-// ──────────────────────────────────────── 状态统计（含去抖 + RIM 判定）
+
 void ParticleSimulation::updateFluidCells() {
-  /* —— 0. 备份前帧状态 —— */
+  /* 0️⃣ 备份上一帧状态 */
   memcpy(m_prevFluid, m_currFluid, sizeof(m_currFluid));
 
-  /* ---------- 1. 统计每格粒子数量 & 平均速度 ---------- */
-  static uint16_t cnt[GC];  // 颗粒计数
-  static float acc[GC];     // 速度累加
+  /* 1️⃣ 统计粒子覆盖半径：cnt[]、acc[] ---------------------------------- */
+  static uint16_t cnt[GC];
+  static float acc[GC];
   memset(cnt, 0, sizeof(cnt));
   memset(acc, 0, sizeof(acc));
 
-  for (int i = 0; i < m_numParticles; ++i) {
-    int gx = clampF(int(m_particles[i].x * GS), 0, GS - 1);
-    int gy = clampF(int(m_particles[i].y * GS), 0, GS - 1);
-    int id = idx(gx, gy);
-    ++cnt[id];
-    acc[id] += hypotf(m_particles[i].vx, m_particles[i].vy);
+  const float r = PARTICLE_RADIUS;  // 归一化空间半径
+  const float r2 = r * r;           // 半径平方
+  const float cell = CELL;          // 1 / GS
+
+  for (int p = 0; p < m_numParticles; ++p) {
+    const float px = m_particles[p].x;
+    const float py = m_particles[p].y;
+    const float speed = hypotf(m_particles[p].vx, m_particles[p].vy);
+
+    /* —— 找出能被此粒子波及的格子 AABB —— */
+    int gx0 = clampF(int((px - r) * GS), 0, GS - 1);
+    int gy0 = clampF(int((py - r) * GS), 0, GS - 1);
+    int gx1 = clampF(int((px + r) * GS), 0, GS - 1);
+    int gy1 = clampF(int((py + r) * GS), 0, GS - 1);
+
+    for (int gx = gx0; gx <= gx1; ++gx)
+      for (int gy = gy0; gy <= gy1; ++gy) {
+        /* —— 精确判距：以格子中心为准 —— */
+        float cx = (gx + 0.5f) * cell;
+        float cy = (gy + 0.5f) * cell;
+        float dx = cx - px;
+        float dy = cy - py;
+        if (dx * dx + dy * dy > r2)
+          continue;  // 超出半径
+
+        int id = idx(gx, gy);
+        ++cnt[id];
+        acc[id] += speed;
+      }
   }
 
-  /* ---------- 2. 初步分类 ---------- */
+  /* 2️⃣ 基础分类（Liquid / RimTransparent / Empty / Foam） -------------- */
   for (int id = 0; id < GC; ++id) {
     const int n = cnt[id];
     const float v = n ? acc[id] / n : 0.f;
 
-    if (n >= FLUID_PARTICLE_THRESHOLD) {
+    if (n >= FLUID_PARTICLE_THRESHOLD)
       m_currFluid[id] = (v > FOAM_SPEED_THRESHOLD) ? FLUID_FOAM : FLUID_LIQUID;
-    } else if (n >= FLUID_RIM_PARTICLE_THRESHOLD) {
-      m_currFluid[id] = FLUID_RIM;  // 稀薄边缘水
-    } else {
+    else if (n >= FLUID_RIM_PARTICLE_THRESHOLD)
+      m_currFluid[id] = FLUID_RIM_TRANSPARENT;
+    else
       m_currFluid[id] = FLUID_EMPTY;
-    }
   }
 
-  /* ---------- 3. 去抖：若周围 ≥3 格“已填满”则本格提升为 RIM ---------- */
-  FluidType debounced[GC];
-  memcpy(debounced, m_currFluid, sizeof(m_currFluid));
+  /* 3️⃣ 卷积：EMPTY → RIM_LIGHT（若邻接液体边缘） */
+  FluidType conv[GC];
+  memcpy(conv, m_currFluid, sizeof(m_currFluid));
 
-  auto filled = [&](int id) -> bool {  // 判定“已填满”
-    return (m_cellType[id] == SOLID_CELL) ||
-           (m_currFluid[id] == FLUID_LIQUID) ||
-           (m_currFluid[id] == FLUID_RIM) || (m_currFluid[id] == FLUID_FOAM);
+  memcpy(convTmp, conv, sizeof(convTmp));  // 保留原状态
+
+  auto neighborFilled = [&](int id) -> bool {
+    return (conv[id] == FLUID_RIM_TRANSPARENT) || (conv[id] == FLUID_LIQUID) ||
+           (conv[id] == FLUID_FOAM);
   };
 
   for (int gx = 0; gx < GS; ++gx) {
     for (int gy = 0; gy < GS; ++gy) {
       int id = idx(gx, gy);
-      if (debounced[id] != FLUID_EMPTY)
-        continue;  // 本来就有水
+      if (conv[id] != FLUID_EMPTY)
+        continue;  // 只有 EMPTY 需要判断
 
-      int filledNbr = 0;
-      for (int dx = -1; dx <= 1; ++dx)
-        for (int dy = -1; dy <= 1; ++dy) {
+      int touch = 0;
+      for (int dx = -1; dx <= 1 && !touch; ++dx)
+        for (int dy = -1; dy <= 1 && !touch; ++dy) {
           if (!dx && !dy)
-            continue;
+            continue;  // 跳过自身
+          if (dx && dy)
+            continue;  // 只看上下左右
           int nx = gx + dx, ny = gy + dy;
           if (nx < 0 || nx >= GS || ny < 0 || ny >= GS)
             continue;
-          if (filled(idx(nx, ny)))
-            ++filledNbr;
+          if (neighborFilled(idx(nx, ny)))
+            ++touch;
         }
 
-      if (filledNbr >= 5)  // 去抖阈值 = 3
-        debounced[id] = FLUID_RIM;
-      if (filledNbr >= 7)  // 去抖阈值 = 3
-        debounced[id] = FLUID_LIQUID;
+      // 根据触边数量决定亮度等级（写到临时数组 convTmp）
+      if (touch >= 4)
+        convTmp[id] = FLUID_LIQUID;
+      else if (touch >= 2)
+        convTmp[id] = FLUID_RIM_TRANSPARENT;
+      else if (touch >= 1)
+        convTmp[id] = FLUID_RIM_LIGHT;
     }
   }
 
-  /* ---------- 4. 写回结果 & 生成变化列表 ---------- */
+  /* ---------- 4. 写回并生成变化表 ---------- */
+  memcpy(conv, convTmp, sizeof(convTmp));  // 一次性覆盖
   m_changedCnt = 0;
-  for (int id = 0; id < GC; ++id) {
-    m_currFluid[id] = debounced[id];
-    if (m_currFluid[id] != m_prevFluid[id])
-      m_changedIdx[m_changedCnt++] = id;
+  for (int i = 0; i < GC; ++i) {
+    m_currFluid[i] = conv[i];
+    if (m_currFluid[i] != m_prevFluid[i])
+      m_changedIdx[m_changedCnt++] = i;
   }
 }
