@@ -4,6 +4,9 @@
 
 基于 waveshare RP2040-1.28-LCD 开发。
 
+# 视频
+[![IMAGE ALT TEXT](http://img.youtube.com/vi/fz67tiyyCQg/0.jpg)](https://www.youtube.com/watch?v=fz67tiyyCQg "Shake change color")
+
 ## 功能
 
 * 模拟液体

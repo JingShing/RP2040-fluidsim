@@ -4,6 +4,9 @@ English | [繁體中文](README_TCH.md) | [簡體中文](README_SCH.md)
 
  Based on waveshare RP2040-1.28-LCD
 
+# Video
+[![IMAGE ALT TEXT](http://img.youtube.com/vi/fz67tiyyCQg/0.jpg)](https://www.youtube.com/watch?v=fz67tiyyCQg "Shake change color")
+
 # Features
 
 - Simulated fluid
